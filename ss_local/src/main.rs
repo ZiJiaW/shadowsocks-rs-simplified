@@ -1,3 +1,5 @@
+#[warn(non_snake_case)]
+
 extern crate tokio;
 #[macro_use]
 extern crate futures;
@@ -20,24 +22,32 @@ fn main()
 {
     let addr = "127.0.0.1:7962".parse().unwrap();
     let listener = TcpListener::bind(&addr).unwrap();
-    let server = listener.incoming().for_each(|socket| {
-        process(socket);
-        Ok(())
+
+    let remote_addr = SS_SERVER_ADDR.parse().unwrap();
+    let local_server = TcpStream::connect(&remote_addr)
+    .and_then(move |remote| {
+        println!("Successfully connect to remote server: {:?}", remote.peer_addr().unwrap());
+        let shared_remote = Arc::new(Mutex::new(remote));
+        listener.incoming().for_each(move |client| {
+            process(client, Arc::clone(&shared_remote));
+            Ok(())
+        })
     })
     .map_err(|e| {
         println!("Error happened: {:?}", e);
     });
+    
     println!("Server listening on {:?}", addr);
-    tokio::run(server);
+    tokio::run(local_server);
 }
 
 mod Socks5 {
     pub const VER: u8 = 0x05;// protocol version
     pub const AUTH: u8 = 0x00;// auth type: no auth
     pub const CMD_TCP: u8 = 0x01;// tcp connection proxy
-    //pub const CMD_UDP: u8 = 0x03;// udp request
+    //pub const CMD_UDP: u8 = 0x03;// udp request hasn't been implemented
     pub const ATYP_V4: u8 = 0x01;// ipv4 address type
-    //pub const ATYP_DN: u8 = 0x03;// domain name address type
+    pub const ATYP_DN: u8 = 0x03;// domain name address type
     pub const REP_OK: u8 = 0x00;
 }
 
@@ -93,15 +103,15 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
     check.and_then(|socket| {
         io::read_exact(socket, vec![0u8]).and_then(|(socket, buf)| {
             if buf[3] == Socks5::ATYP_V4 {
-                Either::A ( io::read_exact(socket, vec![0u8; 6])
+                Either::A(io::read_exact(socket, vec![0u8; 6])
                 .and_then(|(socket, buf)| {
                     let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
                     let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
                     let addr = RqAddr::IPV4(SocketAddr::new(IpAddr::V4(addr), port));
                     Ok((socket, addr))
-                }) )
-            } else {
-                Either::B ( io::read_exact(socket, vec![0u8])
+                }))
+            } else if buf[3] == Socks5::ATYP_DN {
+                Either::B(Either::A(io::read_exact(socket, vec![0u8])
                 .and_then(|(socket, buf)| {
                     let len = buf[0];
                     io::read_exact(socket, vec![0u8; len as usize + 2])
@@ -111,7 +121,11 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
                         let addr = RqAddr::NAME((String::from_utf8(name.to_vec()).unwrap(), port));
                         Ok((socket, addr))
                     })
-                }) )
+                })))
+            } else {
+                Either::B(Either::B(
+                    Err(io::Error::new(io::ErrorKind::PermissionDenied, "No UDP support!")).into_future()
+                ))
             }
         })
     })
@@ -128,11 +142,11 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
 }
 
 // Main processing logic
-fn process(socket: TcpStream)
+fn process(client: TcpStream, remote: Arc<Mutex<TcpStream>>)
 {
-    let handler = hand_shake(socket)
-    .and_then(|socket| {
-        handle_connect(socket)
+    let handler = hand_shake(client)
+    .and_then(|client| {
+        handle_connect(client)
     })
     .map(|_|{})
     .map_err(|_|{});
