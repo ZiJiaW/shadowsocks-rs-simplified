@@ -35,15 +35,15 @@ mod Socks5 {
     pub const VER: u8 = 0x05;// protocol version
     pub const AUTH: u8 = 0x00;// auth type: no auth
     pub const CMD_TCP: u8 = 0x01;// tcp connection proxy
-    pub const CMD_UDP: u8 = 0x03;// udp request
+    //pub const CMD_UDP: u8 = 0x03;// udp request
     pub const ATYP_V4: u8 = 0x01;// ipv4 address type
-    pub const ATYP_DN: u8 = 0x03;// domain name address type
+    //pub const ATYP_DN: u8 = 0x03;// domain name address type
     pub const REP_OK: u8 = 0x00;
 }
 
-enum RQ_ADDR {
+enum RqAddr {
     IPV4(SocketAddr),
-    STR(String),
+    NAME((String, u16)),
 }
 
 // hand shake part of socks5 protocol
@@ -77,41 +77,45 @@ fn hand_shake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = io::Er
 }
 
 // connection configure part
-fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RQ_ADDR), Error = io::Error>
+fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), Error = io::Error>
 {
-    io::read_exact(socket, vec![0u8; 4])
+    let check = io::read_exact(socket, vec![0u8; 3])
     .and_then(|(socket, buf)| {
         if buf[0] != Socks5::VER {
             Err(io::Error::new(io::ErrorKind::InvalidData, "Wrong version!"))
         } else if buf[1] != Socks5::CMD_TCP {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "No UDP support!"))
         } else {
+            Ok(socket)
+        }    
+    });
+    
+    check.and_then(|socket| {
+        io::read_exact(socket, vec![0u8]).and_then(|(socket, buf)| {
             if buf[3] == Socks5::ATYP_V4 {
-                //Either::A(
-                    io::read_exact(socket, vec![0u8; 6])
+                Either::A ( io::read_exact(socket, vec![0u8; 6])
+                .and_then(|(socket, buf)| {
+                    let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                    let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
+                    let addr = RqAddr::IPV4(SocketAddr::new(IpAddr::V4(addr), port));
+                    Ok((socket, addr))
+                }) )
+            } else {
+                Either::B ( io::read_exact(socket, vec![0u8])
+                .and_then(|(socket, buf)| {
+                    let len = buf[0];
+                    io::read_exact(socket, vec![0u8; len as usize + 2])
                     .and_then(|(socket, buf)| {
-                        let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-                        let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
-                        let addr = RQ_ADDR::IPV4(SocketAddr::new(IpAddr::V4(addr), port));
+                        let (name, port) = buf.split_at(buf.len() - 2);
+                        let port = ((port[0] as u16) << 8) | (port[1] as u16);
+                        let addr = RqAddr::NAME((String::from_utf8(name.to_vec()).unwrap(), port));
                         Ok((socket, addr))
                     })
-                //)
-            } else {
-                //Either::B(
-                    io::read_exact(socket, vec![0u8])
-                    .and_then(|(socket, buf)| {
-                        let len = buf[0];
-                        io::read_exact(socket, vec![0u8; len as usize])
-                        .and_then(|(socket, buf)| {
-                            let addr = RQ_ADDR::STR(String::from_utf8(buf).unwrap());
-                            Ok((socket, addr))
-                        })
-                    })
-                //)
+                }) )
             }
-        }    
+        })
     })
-    .and_then(|(socket, addr)| {
+    .and_then(|(socket, addr)| {// write response to client
         let response: Vec<u8> = vec![
             Socks5::VER, Socks5::REP_OK, 0x0, Socks5::ATYP_V4,
             0x0, 0x0, 0x0, 0x0, 0x10, 0x10
