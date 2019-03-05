@@ -16,30 +16,9 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 use std::sync::{Arc, Mutex};
 
+use openssl::symm::{encrypt, Cipher, decrypt};
+
 const SS_SERVER_ADDR: &'static str = "127.0.0.1:9002";
-
-fn main()
-{
-    let addr = "127.0.0.1:7962".parse().unwrap();
-    let listener = TcpListener::bind(&addr).unwrap();
-
-    let remote_addr = SS_SERVER_ADDR.parse().unwrap();
-    let local_server = TcpStream::connect(&remote_addr)
-    .and_then(move |remote| {
-        println!("Successfully connect to remote server: {:?}", remote.peer_addr().unwrap());
-        let shared_remote = Arc::new(Mutex::new(remote));
-        listener.incoming().for_each(move |client| {
-            process(client, Arc::clone(&shared_remote));
-            Ok(())
-        })
-    })
-    .map_err(|e| {
-        println!("Error happened: {:?}", e);
-    });
-    
-    println!("Server listening on {:?}", addr);
-    tokio::run(local_server);
-}
 
 mod Socks5 {
     pub const VER: u8 = 0x05;// protocol version
@@ -54,6 +33,33 @@ mod Socks5 {
 enum RqAddr {
     IPV4(SocketAddr),
     NAME((String, u16)),
+}
+
+// simple AES encryption
+struct Encypter {
+    cipher: Cipher,
+    key: Vec<u8>,
+    iv: Vec<u8>,
+}
+
+impl Encypter {
+    fn new() -> Encypter
+    {
+        let cipher = Cipher::aes_128_cbc();
+        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
+        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07".to_vec();
+        Encypter {cipher, key, iv}
+    }
+
+    fn encode(&mut self, text: &[u8]) -> Vec<u8>
+    {
+        encrypt(self.cipher, &self.key, Some(&self.iv), text).unwrap()
+    }
+
+    fn decode(&mut self, text: &[u8]) -> Vec<u8>
+    {
+        decrypt(self.cipher, &self.key, Some(&self.iv), text).unwrap()
+    }
 }
 
 // hand shake part of socks5 protocol
@@ -142,13 +148,47 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
 }
 
 // Main processing logic
-fn process(client: TcpStream, remote: Arc<Mutex<TcpStream>>)
+fn process(client: TcpStream, remote: Arc<Mutex<TcpStream>>, encrypter: Arc<Mutex<Encypter>>)
 {
     let handler = hand_shake(client)
     .and_then(|client| {
         handle_connect(client)
     })
+    // .and_then(|(client, addr)| {
+
+    // })
     .map(|_|{})
     .map_err(|_|{});
     tokio::spawn(handler);
+}
+
+
+fn main()
+{
+    let addr = "127.0.0.1:7962".parse().unwrap();
+    let listener = TcpListener::bind(&addr).unwrap();
+
+    let encrypter = Arc::new(Mutex::new(Encypter::new()));
+    let data = encrypter.clone().lock().unwrap().encode(&vec![1,2,3,4]);
+    println!("encrypted data: {:?}", data);
+    let data = encrypter.clone().lock().unwrap().decode(&data);
+    println!("decrypted data: {:?}", data);
+
+    let remote_addr = SS_SERVER_ADDR.parse().unwrap();
+
+    let local_server = TcpStream::connect(&remote_addr)
+    .and_then(move |remote| {
+        println!("Successfully connect to remote server: {:?}", remote.peer_addr().unwrap());
+        let shared_remote = Arc::new(Mutex::new(remote));
+        listener.incoming().for_each(move |client| {
+            process(client, Arc::clone(&shared_remote), Arc::clone(&encrypter));
+            Ok(())
+        })
+    })
+    .map_err(|e| {
+        println!("Error happened: {:?}", e);
+    });
+    
+    println!("Server listening on {:?}", addr);
+    tokio::run(local_server);
 }
