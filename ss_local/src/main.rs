@@ -1,6 +1,5 @@
 extern crate tokio;
 extern crate futures;
-extern crate bytes;
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
@@ -8,8 +7,7 @@ use tokio::prelude::*;
 use futures::future::{Either};
 
 use std::sync::{Arc, Mutex};
-
-use openssl::symm::{encrypt, Cipher, decrypt};
+use ss_local::Encypter;
 
 const SS_SERVER_ADDR: &'static str = "127.0.0.1:9002";
 
@@ -27,33 +25,6 @@ mod Socks5 {
 enum RqAddr {
     IPV4(Vec<u8>),
     NAME(Vec<u8>),
-}
-
-// simple AES encryption
-struct Encypter {
-    cipher: Cipher,
-    key: Vec<u8>,
-    iv: Vec<u8>,
-}
-
-impl Encypter {
-    fn new() -> Encypter
-    {
-        let cipher = Cipher::aes_128_cbc();
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07".to_vec();
-        Encypter {cipher, key, iv}
-    }
-
-    fn encode(&mut self, text: &[u8]) -> Vec<u8>
-    {
-        encrypt(self.cipher, &self.key, Some(&self.iv), text).unwrap()
-    }
-
-    fn decode(&mut self, text: &[u8]) -> Vec<u8>
-    {
-        decrypt(self.cipher, &self.key, Some(&self.iv), text).unwrap()
-    }
 }
 
 // hand shake part of socks5 protocol
@@ -105,8 +76,6 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
             if buf[3] == Socks5::ATYP_V4 {
                 Either::A(io::read_exact(socket, vec![0u8; 6])
                 .and_then(|(socket, buf)| {
-                    //let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-                    //let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
                     let addr = RqAddr::IPV4(Vec::from(buf));
                     Ok((socket, addr))
                 }))
@@ -116,9 +85,6 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
                     let len = buf[0];
                     io::read_exact(socket, vec![0u8; len as usize + 2])
                     .and_then(|(socket, buf)| {
-                        //let (name, port) = buf.split_at(buf.len() - 2);
-                        //let port = ((port[0] as u16) << 8) | (port[1] as u16);
-                        //let addr = RqAddr::NAME((String::from_utf8(name.to_vec()).unwrap(), port));
                         let addr = RqAddr::NAME(Vec::from(buf));
                         Ok((socket, addr))
                     })
@@ -154,12 +120,12 @@ fn handle_proxy(client: TcpStream, encrypter: Arc<Mutex<Encypter>>, addr: RqAddr
 
             let mut dst = match addr {
                 RqAddr::IPV4(mut addr) => {
-                    addr.insert(0, 0x1);
+                    addr.insert(0, 0x1);// 0x1 127 0 0 1 0x0 0x50
                     addr// indicate ipv4 addr
                 },
                 RqAddr::NAME(mut addr) => {
-                    assert!(addr.len() <= 255);
-                    addr.insert(0, addr.len() as u8);
+                    assert!(addr.len() - 2 <= 255);
+                    addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
                     addr// indicate addr length
                 }
             };
