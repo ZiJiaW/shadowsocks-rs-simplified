@@ -7,7 +7,6 @@ use ss_local::Encypter;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
-use futures::future::{Either};
 
 use std::sync::{Arc, Mutex};
 use std::net::{Ipv4Addr, IpAddr, SocketAddr};
@@ -21,31 +20,58 @@ fn query_dns(name: &str) -> IpAddr
     let config = ResolverConfig::from_parts(None, vec![], nameserver);
     let resolver = Resolver::new(config, ResolverOpts::default()).unwrap();
     let response = resolver.lookup_ip(name).unwrap();
-    response.iter().next().unwrap();
+    response.iter().next().unwrap()
 }
 
 
 fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
 {
-    io::read_to_end(socket, Vec::with_capacity(1024))
+    let process = io::read_to_end(socket, Vec::with_capacity(1024))
     .and_then(move |(socket, data)| {
         let mut data = encrypter.lock().unwrap().decode(&data);
-        let dst = match data[0] {
+        println!("get data: {:?}", data);
+        let (dst_addr, data) = match data[0] {
             0x1 => {
                 let addr = Ipv4Addr::new(data[1], data[2], data[3], data[4]);
                 let port = ((data[5] as u16) << 8) | (data[6] as u16);
-                SocketAddr::new(IpAddr::V4(addr), port)
+                let data = data.split_off(7);
+                (SocketAddr::new(IpAddr::V4(addr), port), data)
             },
             length => {
+                let length = length as usize;
                 let port = ((data[length + 1] as u16) << 8) | (data[length + 2] as u16);
                 let addr = &data[1..length];
-                println!("query address: {}", String::from_utf8(addr.to_vec()));
-                let ip = query_dns(String::from_utf8_lossy(addr));
-                SocketAddr::new(ip, port)
+                println!("query address: {}", String::from_utf8(addr.to_vec()).unwrap());
+                let ip = query_dns(& String::from_utf8_lossy(addr));
+                let data = data.split_off(length+3);
+                (SocketAddr::new(ip, port), data)
             }
         };
-        // TO DO
+        
+        TcpStream::connect(&dst_addr).and_then(move |dst_stream| {
+            io::write_all(dst_stream, data)
+            .and_then(|(dst_stream, _)| {
+                io::read_to_end(dst_stream, Vec::with_capacity(1024))
+                .and_then(|(_, buf)| {
+                    Ok(buf)
+                })
+            })
+        })
+        .and_then(move |buf| {
+            Ok((socket, buf, encrypter))
+        })
     })
+    .and_then(|(socket, buf, encrypter)| {
+        let response = encrypter.lock().unwrap().encode(&buf);
+        io::write_all(socket, response)
+        .and_then(|_|{
+            Ok(())
+        })
+    })
+    .map_err(|e| {
+        println!("Error happened when fetching data: {:?}", e);
+    });
+    tokio::spawn(process);
 }
 
 fn main() {
@@ -54,8 +80,9 @@ fn main() {
     let listener = TcpListener::bind(&addr).unwrap();
 
     let remote_server = 
-    listener.incoming.for_each(|socket| {
-        process(socket, Arc::clone(encrypter));
+    listener.incoming().for_each(move |socket| {
+        println!("new client {:?}!", socket.peer_addr().unwrap());
+        process(socket, Arc::clone(&encrypter));
         Ok(())
     })
     .map_err(|e| { println!("Error happened in serving: {:?}", e); });

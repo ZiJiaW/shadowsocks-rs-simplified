@@ -1,5 +1,7 @@
 extern crate tokio;
+#[macro_use]
 extern crate futures;
+extern crate bytes;
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
@@ -8,6 +10,7 @@ use futures::future::{Either};
 
 use std::sync::{Arc, Mutex};
 use ss_local::Encypter;
+use bytes::{BytesMut, BufMut};
 
 const SS_SERVER_ADDR: &'static str = "127.0.0.1:9002";
 
@@ -27,6 +30,80 @@ enum RqAddr {
     NAME(Vec<u8>),
 }
 
+// handle message transfer task
+struct Transfer {
+    client: TcpStream,
+    remote: TcpStream,
+    rd: BytesMut,
+    encrypter: Arc<Mutex<Encypter>>,
+    dst: RqAddr,
+}
+
+impl Transfer {
+    fn new(client: TcpStream, remote: TcpStream, encrypter: Arc<Mutex<Encypter>>, dst: RqAddr) -> Transfer
+    {
+        Transfer{
+            client, remote, rd: BytesMut::new(), encrypter, dst
+        }
+    }
+}
+
+impl Future for Transfer {
+    type Item = ();
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error>
+    {
+        // read message from client as much as possible
+        loop {
+            self.rd.reserve(1024);
+            let n = try_ready!(self.client.read_buf(&mut self.rd));
+            if n == 0 {
+                break;
+            }
+        }
+        let mut dst = match &mut self.dst {
+            RqAddr::IPV4(addr) => {
+                addr.insert(0, 0x1);// 0x1 127 0 0 1 0x0 0x50
+                BytesMut::from(addr.clone())// indicate ipv4 addr
+            },
+            RqAddr::NAME(addr) => {
+                println!("addr is {:?}", addr);
+                assert!(addr.len() - 2 <= 255);
+                addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
+                BytesMut::from(addr.clone())// indicate addr length
+            }
+        };
+        println!("received len: {}", self.rd.len());
+        println!("received data: {}", String::from_utf8_lossy(&self.rd));
+        dst.reserve(self.rd.len());
+        dst.put(&self.rd);
+        let mut dst = BytesMut::from(self.encrypter.lock().unwrap().encode(&dst));
+        while !dst.is_empty() {
+            let n = try_ready!(self.remote.poll_write(&dst));
+            assert!(n > 0);
+            dst.split_to(n);// discard
+        }
+        //--------------------read from romote now---------------------------
+        self.rd.clear();
+        loop {
+            self.rd.reserve(1024);
+            let n = try_ready!(self.remote.read_buf(&mut self.rd));
+            if n == 0 {
+                break;
+            }
+        }
+        println!("remote message len is {}", self.rd.len());
+        let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd));
+        while !data.is_empty() {
+            let n = try_ready!(self.client.poll_write(&data));
+            assert!(n > 0);
+            data.split_to(n);
+        }
+        Ok(Async::Ready(()))
+    }
+}
+
 // hand shake part of socks5 protocol
 fn hand_shake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error>
 {
@@ -36,6 +113,7 @@ fn hand_shake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = io::Er
             println!("addr {:?} socks version is {}!", socket.peer_addr().unwrap(), buf[0]);
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Wrong version!"));
         } else {
+            //println!("version ok!");
             let len = buf[1];
             Ok((socket, len))
         }
@@ -60,8 +138,10 @@ fn hand_shake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = io::Er
 // connection configure part
 fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), Error = io::Error>
 {
+    println!("handle connection now!");
     let check = io::read_exact(socket, vec![0u8; 3])
     .and_then(|(socket, buf)| {
+        println!("connect message: {:?}", buf);
         if buf[0] != Socks5::VER {
             Err(io::Error::new(io::ErrorKind::InvalidData, "Wrong version!"))
         } else if buf[1] != Socks5::CMD_TCP {
@@ -73,13 +153,16 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
     
     check.and_then(|socket| {
         io::read_exact(socket, vec![0u8]).and_then(|(socket, buf)| {
-            if buf[3] == Socks5::ATYP_V4 {
+            println!("addr type: {:?}", buf);
+            if buf[0] == Socks5::ATYP_V4 {
                 Either::A(io::read_exact(socket, vec![0u8; 6])
                 .and_then(|(socket, buf)| {
+                    println!("addr: {:?}", buf);
                     let addr = RqAddr::IPV4(Vec::from(buf));
+                    
                     Ok((socket, addr))
                 }))
-            } else if buf[3] == Socks5::ATYP_DN {
+            } else if buf[0] == Socks5::ATYP_DN {
                 Either::B(Either::A(io::read_exact(socket, vec![0u8])
                 .and_then(|(socket, buf)| {
                     let len = buf[0];
@@ -111,43 +194,11 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
 fn handle_proxy(client: TcpStream, encrypter: Arc<Mutex<Encypter>>, addr: RqAddr)
     -> impl Future<Item = (), Error = io::Error>
 {
-
+    println!("handle proxy now!");
     let remote_addr = SS_SERVER_ADDR.parse().unwrap();
 
     TcpStream::connect(&remote_addr).and_then(move |remote| {
-        io::read_to_end(client, Vec::with_capacity(1024))
-        .and_then(move |(client, mut buf)| {
-
-            let mut dst = match addr {
-                RqAddr::IPV4(mut addr) => {
-                    addr.insert(0, 0x1);// 0x1 127 0 0 1 0x0 0x50
-                    addr// indicate ipv4 addr
-                },
-                RqAddr::NAME(mut addr) => {
-                    assert!(addr.len() - 2 <= 255);
-                    addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
-                    addr// indicate addr length
-                }
-            };
-
-            dst.append(& mut buf);
-            let data = encrypter.lock().unwrap().encode(&dst);
-            io::write_all(remote, data)
-            .and_then(|(remote, _)| {
-                Ok((client, remote, encrypter))
-            })
-        })
-        .and_then(|(client, remote, encrypter)| {
-            io::read_to_end(remote, Vec::with_capacity(1024))
-            .and_then(move |(_, data)| {
-                let data = encrypter.lock().unwrap().decode(&data);
-                Ok((client, data))
-            })
-        })
-        .and_then(|(client, data)| {
-            io::write_all(client, data)
-        })
-        .map(|_|{ })
+        Transfer::new(client, remote, encrypter, addr)
     })
 }
 
@@ -175,7 +226,16 @@ fn main()
 
     let local_server = 
     listener.incoming().for_each(move |client| {
+        println!("New connection: {:?}", client.peer_addr().unwrap());
         process(client, Arc::clone(&encrypter));
+        // let mut buf = BytesMut::new();
+        // buf.reserve(1024);
+        // buf.resize(1024, 0x1);
+        // let a = io::read(client, buf).and_then(|(socket, buf, len)|{
+        //     println!("get data {:?}, len ", buf);
+        //     Ok(())
+        // }).map(|_|{}).map_err(|_|{});
+        // tokio::spawn(a);
         Ok(())
     })
     .map_err(|e| {
