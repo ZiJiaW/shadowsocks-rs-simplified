@@ -68,14 +68,14 @@ impl Future for Transfer {
                 BytesMut::from(addr.clone())// indicate ipv4 addr
             },
             RqAddr::NAME(addr) => {
-                println!("addr is {:?}", addr);
+                //println!("addr is {:?}", addr);
                 assert!(addr.len() - 2 <= 255);
                 addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
                 BytesMut::from(addr.clone())// indicate addr length
             }
         };
-        println!("received len: {}", self.rd.len());
-        println!("received data: {}", String::from_utf8_lossy(&self.rd));
+        println!("received data length: {}", self.rd.len());
+        //println!("received data: {}", String::from_utf8_lossy(&self.rd));
         dst.reserve(self.rd.len());
         dst.put(&self.rd);
         let mut dst = BytesMut::from(self.encrypter.lock().unwrap().encode(&dst));
@@ -84,6 +84,7 @@ impl Future for Transfer {
             assert!(n > 0);
             dst.split_to(n);// discard
         }
+        println!("all data sent!");
         //--------------------read from romote now---------------------------
         self.rd.clear();
         loop {
@@ -138,10 +139,10 @@ fn hand_shake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = io::Er
 // connection configure part
 fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), Error = io::Error>
 {
-    println!("handle connection now!");
+    //println!("handle connection now!");
     let check = io::read_exact(socket, vec![0u8; 3])
     .and_then(|(socket, buf)| {
-        println!("connect message: {:?}", buf);
+        //println!("connect message: {:?}", buf);
         if buf[0] != Socks5::VER {
             Err(io::Error::new(io::ErrorKind::InvalidData, "Wrong version!"))
         } else if buf[1] != Socks5::CMD_TCP {
@@ -153,13 +154,12 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
     
     check.and_then(|socket| {
         io::read_exact(socket, vec![0u8]).and_then(|(socket, buf)| {
-            println!("addr type: {:?}", buf);
+            //println!("addr type: {:?}", buf);
             if buf[0] == Socks5::ATYP_V4 {
                 Either::A(io::read_exact(socket, vec![0u8; 6])
                 .and_then(|(socket, buf)| {
-                    println!("addr: {:?}", buf);
+                    println!("addr of ip: {:?}", buf);
                     let addr = RqAddr::IPV4(Vec::from(buf));
-                    
                     Ok((socket, addr))
                 }))
             } else if buf[0] == Socks5::ATYP_DN {
@@ -168,7 +168,10 @@ fn handle_connect(socket: TcpStream) -> impl Future<Item = (TcpStream, RqAddr), 
                     let len = buf[0];
                     io::read_exact(socket, vec![0u8; len as usize + 2])
                     .and_then(|(socket, buf)| {
+                        let mut pr: Vec<u8> = buf.clone();
                         let addr = RqAddr::NAME(Vec::from(buf));
+                        pr.split_off(pr.len() - 2);
+                        println!("addr of domain name: {}", String::from_utf8(pr).unwrap());
                         Ok((socket, addr))
                     })
                 })))
@@ -226,7 +229,7 @@ fn main()
 
     let local_server = 
     listener.incoming().for_each(move |client| {
-        println!("New connection: {:?}", client.peer_addr().unwrap());
+        println!("New connection from: {:?}", client.peer_addr().unwrap());
         process(client, Arc::clone(&encrypter));
         // let mut buf = BytesMut::new();
         // buf.reserve(1024);

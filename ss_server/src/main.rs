@@ -26,10 +26,10 @@ fn query_dns(name: &str) -> IpAddr
 
 fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
 {
-    let process = io::read_to_end(socket, Vec::with_capacity(1024))
-    .and_then(move |(socket, data)| {
+    let process = io::read(socket, Vec::new())
+    .and_then(move |(socket, data, len)| {
         let mut data = encrypter.lock().unwrap().decode(&data);
-        println!("get data: {:?}", data);
+        println!("get data len: {}", len);
         let (dst_addr, data) = match data[0] {
             0x1 => {
                 let addr = Ipv4Addr::new(data[1], data[2], data[3], data[4]);
