@@ -7,12 +7,14 @@ use ss_local::Encypter;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
+use tokio::runtime::current_thread::Runtime;
 
 use std::sync::{Arc, Mutex};
 use std::net::{Ipv4Addr, IpAddr, SocketAddr};
 
 use trust_dns_resolver::Resolver;
-use trust_dns_resolver::config::{ResolverConfig, NameServerConfigGroup, ResolverOpts};
+use trust_dns_resolver::ResolverFuture;
+use trust_dns_resolver::config::*;
 
 fn query_dns(name: &str) -> IpAddr
 {
@@ -21,15 +23,33 @@ fn query_dns(name: &str) -> IpAddr
     let resolver = Resolver::new(config, ResolverOpts::default()).unwrap();
     let response = resolver.lookup_ip(name).unwrap();
     response.iter().next().unwrap()
+
+
+// We need a Tokio reactor::Core to run the resolver
+//  this is responsible for running all Future tasks and registering interest in IO channels
+// let mut io_loop = Runtime::new().unwrap();
+//     let resolver = ResolverFuture::new(ResolverConfig::default(), ResolverOpts::default());
+// The resolver we just constructed is a Future wait for the actual Resolver
+// let resolver = io_loop.block_on(resolver).unwrap();
+
+// Lookup the IP addresses associated with a name.
+// This returns a future that will lookup the IP addresses, it must be run in the Core to
+//  to get the actual result.
+// let lookup_future = resolver.lookup_ip("www.example.com.");
+
+// Run the lookup until it resolves or errors
+// let mut response = io_loop.block_on(lookup_future).unwrap();
 }
 
 
 fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
 {
-    let process = io::read(socket, Vec::new())
+    let process = io::read(socket, vec![0; 2048])
     .and_then(move |(socket, data, len)| {
-        let mut data = encrypter.lock().unwrap().decode(&data);
-        println!("get data len: {}", len);
+        println!("get encrypted data len: {}", len);
+        let mut data = encrypter.lock().unwrap().decode(&data[0..len]);
+        //println!("get data len: {}", len);
+
         let (dst_addr, data) = match data[0] {
             0x1 => {
                 let addr = Ipv4Addr::new(data[1], data[2], data[3], data[4]);
@@ -42,7 +62,7 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
                 let port = ((data[length + 1] as u16) << 8) | (data[length + 2] as u16);
                 let addr = &data[1..length];
                 println!("query address: {}", String::from_utf8(addr.to_vec()).unwrap());
-                let ip = query_dns(& String::from_utf8_lossy(addr));
+                let ip = query_dns(&String::from_utf8_lossy(addr));
                 let data = data.split_off(length+3);
                 (SocketAddr::new(ip, port), data)
             }
@@ -51,8 +71,9 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
         TcpStream::connect(&dst_addr).and_then(move |dst_stream| {
             io::write_all(dst_stream, data)
             .and_then(|(dst_stream, _)| {
-                io::read_to_end(dst_stream, Vec::with_capacity(1024))
-                .and_then(|(_, buf)| {
+                io::read(dst_stream, vec![0; 2048])
+                .and_then(|(_, buf, len)| {
+                    println!("rcv len {}", len);
                     Ok(buf)
                 })
             })
@@ -85,7 +106,9 @@ fn main() {
         process(socket, Arc::clone(&encrypter));
         Ok(())
     })
-    .map_err(|e| { println!("Error happened in serving: {:?}", e); });
+    .map_err(|e| {
+        println!("Error happened in serving: {:?}", e);
+    });
     println!("Server listening on {:?}", addr);
     tokio::run(remote_server);
 }

@@ -54,13 +54,11 @@ impl Future for Transfer {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error>
     {
-        // read message from client as much as possible
-        loop {
-            self.rd.reserve(1024);
-            let n = try_ready!(self.client.read_buf(&mut self.rd));
-            if n == 0 {
-                break;
-            }
+        // read message from client
+        self.rd.reserve(2048);
+        let n = try_ready!(self.client.read_buf(&mut self.rd));
+        if n == 0 {
+            return Ok(Async::Ready(()));// closed
         }
         let mut dst = match &mut self.dst {
             RqAddr::IPV4(addr) => {
@@ -79,6 +77,8 @@ impl Future for Transfer {
         dst.reserve(self.rd.len());
         dst.put(&self.rd);
         let mut dst = BytesMut::from(self.encrypter.lock().unwrap().encode(&dst));
+        println!("{} data to send!", dst.len());
+        //println!("sent data {:?}", dst);
         while !dst.is_empty() {
             let n = try_ready!(self.remote.poll_write(&dst));
             assert!(n > 0);
@@ -88,18 +88,18 @@ impl Future for Transfer {
         //--------------------read from romote now---------------------------
         self.rd.clear();
         loop {
-            self.rd.reserve(1024);
+            self.rd.reserve(2048);
             let n = try_ready!(self.remote.read_buf(&mut self.rd));
             if n == 0 {
                 break;
             }
-        }
-        println!("remote message len is {}", self.rd.len());
-        let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd));
-        while !data.is_empty() {
-            let n = try_ready!(self.client.poll_write(&data));
-            assert!(n > 0);
-            data.split_to(n);
+            println!("remote message len is {}", self.rd.len());
+            let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd));
+            while !data.is_empty() {
+                let n = try_ready!(self.client.poll_write(&data));
+                assert!(n > 0);
+                data.split_to(n);
+            }
         }
         Ok(Async::Ready(()))
     }
@@ -226,6 +226,14 @@ fn main()
     let listener = TcpListener::bind(&addr).unwrap();
 
     let encrypter = Arc::new(Mutex::new(Encypter::new()));
+
+    let mut newen = Encypter::new();
+
+    let data = BytesMut::from(vec![1,2,3,4,5,6]);
+    let enc = encrypter.lock().unwrap().encode(&data);
+    println!("enc {:?}", enc);
+    let dec = newen.decode(&enc);
+    println!("{:?}", dec);
 
     let local_server = 
     listener.incoming().for_each(move |client| {
