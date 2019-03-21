@@ -1,6 +1,7 @@
 extern crate tokio;
 #[macro_use]
 extern crate futures;
+extern crate trust_dns_resolver;
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
@@ -8,6 +9,11 @@ use tokio::prelude::*;
 
 use bytes::BufMut;
 use bytes::BytesMut;
+
+use std::net::*;
+use tokio::runtime::current_thread::Runtime;
+use trust_dns_resolver::ResolverFuture;
+use trust_dns_resolver::config::*;
 
 struct ReadAll {
     socket: TcpStream,
@@ -56,10 +62,28 @@ fn main() {
         io::read(socket, vec![0; 200]).and_then(|(socket, data, len)| {
             println!("{}", len);
             println!("data: {:?}", String::from_utf8(data).unwrap());
-            Ok(())
+            
+            let resolver = ResolverFuture::new(
+                ResolverConfig::default(),
+                ResolverOpts::default()
+            );
+            resolver.and_then(|resolver| {
+                resolver.lookup_ip("www.baidu.com")
+            })
+            .and_then(|ips| {
+                let ip = ips.iter().next().unwrap();
+                println!("ip: {:?}", ip);
+                Ok(())
+            })
+            .map_err(|_| {io::Error::from(io::ErrorKind::InvalidData)})
         })
         .map_err(|e| { println!("Error happened in serving: {:?}", e); });
+
+
         tokio::spawn(pro);
+
+
+
         //tokio::spawn(ReadAll::new(socket).map_err(|e|{println!("error happened!");}));
         Ok(())
     })

@@ -87,19 +87,17 @@ impl Future for Transfer {
         println!("all data sent!");
         //--------------------read from romote now---------------------------
         self.rd.clear();
-        loop {
-            self.rd.reserve(2048);
-            let n = try_ready!(self.remote.read_buf(&mut self.rd));
-            if n == 0 {
-                break;
-            }
-            println!("remote message len is {}", self.rd.len());
-            let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd));
-            while !data.is_empty() {
-                let n = try_ready!(self.client.poll_write(&data));
-                assert!(n > 0);
-                data.split_to(n);
-            }
+        self.rd.reserve(2048);
+        let n = try_ready!(self.remote.read_buf(&mut self.rd));
+        if n == 0 {
+            return Ok(Async::Ready(()));
+        }
+        println!("remote message len is {}", self.rd.len());
+        let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd));
+        while !data.is_empty() {
+            let n = try_ready!(self.client.poll_write(&data));
+            assert!(n > 0);
+            data.split_to(n);
         }
         Ok(Async::Ready(()))
     }
