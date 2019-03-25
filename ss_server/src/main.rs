@@ -40,6 +40,9 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
     let process = io::read(socket, vec![0; 2048])
     .and_then(move |(socket, data, len)| {
         println!("get encrypted data len: {}", len);
+        if len == 0 {
+            return Either::A(future::err(io::Error::from(io::ErrorKind::NotConnected)));
+        }
         let mut data = encrypter.lock().unwrap().decode(&data[0..len]);
         //println!("get data len: {}", len);
 
@@ -59,25 +62,26 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
                 (Either::B(query_addr(addr, port)), data)
             }
         };
-        
+        Either::B(
         addr_future.and_then(|dst_addr| {
             TcpStream::connect(&dst_addr).and_then(move |dst_stream| {
                 io::write_all(dst_stream, request_data)
                 .and_then(|(dst_stream, _)| {
-                    io::read(dst_stream, vec![0; 2048])
+                    io::read(dst_stream, vec![0; 10240])
                     .and_then(|(_, buf, len)| {
-                        println!("rcv len {}", len);
-                        Ok(buf)
+                        println!("rcv len is {}", len);
+                        Ok((buf, len))
                     })
                 })
             })
-            .and_then(move |buf| {
-                Ok((socket, buf, encrypter))
+            .and_then(move |(buf, len)| {
+                Ok((socket, buf, len, encrypter))
             })
         })
+        )
     })
-    .and_then(|(socket, buf, encrypter)| {
-        let response = encrypter.lock().unwrap().encode(&buf);
+    .and_then(|(socket, buf, len, encrypter)| {
+        let response = encrypter.lock().unwrap().encode(&buf[0..len]);
         io::write_all(socket, response)
         .and_then(|_|{
             println!("response sent!");

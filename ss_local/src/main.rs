@@ -37,13 +37,14 @@ struct Transfer {
     rd: BytesMut,
     encrypter: Arc<Mutex<Encypter>>,
     dst: RqAddr,
+    sent_done: bool,
 }
 
 impl Transfer {
     fn new(client: TcpStream, remote: TcpStream, encrypter: Arc<Mutex<Encypter>>, dst: RqAddr) -> Transfer
     {
         Transfer{
-            client, remote, rd: BytesMut::new(), encrypter, dst
+            client, remote, rd: BytesMut::new(), encrypter, dst, sent_done: false, 
         }
     }
 }
@@ -55,50 +56,54 @@ impl Future for Transfer {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error>
     {
         // read message from client
-        self.rd.reserve(2048);
-        let n = try_ready!(self.client.read_buf(&mut self.rd));
-        if n == 0 {
-            return Ok(Async::Ready(()));// closed
-        }
-        let mut dst = match &mut self.dst {
-            RqAddr::IPV4(addr) => {
-                addr.insert(0, 0x1);// 0x1 127 0 0 1 0x0 0x50
-                BytesMut::from(addr.clone())// indicate ipv4 addr
-            },
-            RqAddr::NAME(addr) => {
-                //println!("addr is {:?}", addr);
-                assert!(addr.len() - 2 <= 255);
-                addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
-                BytesMut::from(addr.clone())// indicate addr length
+        if !self.sent_done {
+            self.rd.reserve(2048);
+            let n = try_ready!(self.client.read_buf(&mut self.rd));
+            if n == 0 {
+                return Ok(Async::Ready(()));// closed
             }
-        };
-        println!("received data length: {}", self.rd.len());
-        //println!("received data: {}", String::from_utf8_lossy(&self.rd));
-        dst.reserve(self.rd.len());
-        dst.put(&self.rd);
-        let mut dst = BytesMut::from(self.encrypter.lock().unwrap().encode(&dst));
-        println!("{} data to send!", dst.len());
-        //println!("sent data {:?}", dst);
-        while !dst.is_empty() {
-            let n = try_ready!(self.remote.poll_write(&dst));
-            assert!(n > 0);
-            dst.split_to(n);// discard
+            let mut dst = match &mut self.dst {
+                RqAddr::IPV4(addr) => {
+                    addr.insert(0, 0x1);// 0x1 127 0 0 1 0x0 0x50
+                    BytesMut::from(addr.clone())// indicate ipv4 addr
+                },
+                RqAddr::NAME(addr) => {
+                    //println!("addr is {:?}", addr);
+                    assert!(addr.len() - 2 <= 255);
+                    addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
+                    BytesMut::from(addr.clone())// indicate addr length
+                }
+            };
+            println!("received data length: {}", self.rd.len());
+            //println!("received data: {}", String::from_utf8_lossy(&self.rd));
+            dst.reserve(self.rd.len());
+            dst.put(&self.rd);
+            let mut dst = BytesMut::from(self.encrypter.lock().unwrap().encode(&dst));
+            println!("{} data to send!", dst.len());
+            //println!("sent data {:?}", dst);
+            while !dst.is_empty() {
+                let n = try_ready!(self.remote.poll_write(&dst));
+                assert!(n > 0);
+                dst.split_to(n);// discard
+            }
+            println!("all data sent!");
+            self.sent_done = true;
         }
-        println!("all data sent!");
         //--------------------read from romote now---------------------------
         self.rd.clear();
-        self.rd.reserve(2048);
+        self.rd.reserve(10240);
         let n = try_ready!(self.remote.read_buf(&mut self.rd));
         if n == 0 {
             return Ok(Async::Ready(()));
         }
-        println!("remote message len is {}", self.rd.len());
-        let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd));
+        println!("remote message len is {}", n);
+        let mut data = BytesMut::from(self.encrypter.lock().unwrap().decode(&self.rd[0..n]));
         while !data.is_empty() {
             let n = try_ready!(self.client.poll_write(&data));
             assert!(n > 0);
             data.split_to(n);
         }
+        println!("response ok!");
         Ok(Async::Ready(()))
     }
 }
