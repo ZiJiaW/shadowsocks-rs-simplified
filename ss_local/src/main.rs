@@ -31,6 +31,89 @@ enum RqAddr {
 }
 
 // handle message transfer task
+// receive from remote server and decrypt
+struct RcvFromRemote {
+    client: Arc<Mutex<TcpStream>>,
+    remote: Arc<Mutex<TcpStream>>,
+    rd: BytesMut,
+    encrypter: Arc<Mutex<Encypter>>,
+}
+
+impl RcvFromRemote {
+    fn new(
+        client: Arc<Mutex<TcpStream>>,
+        remote: Arc<Mutex<TcpStream>>,
+        encrypter: Arc<Mutex<Encypter>>
+    ) -> RcvFromRemote {
+        RcvFromRemote{
+            client, remote, rd: BytesMut::new(), encrypter,
+        }
+    }
+}
+
+impl Future for RcvFromRemote {
+    type Item = ();
+    type Error = io::Error;
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error>
+    {
+
+    }
+}
+
+// receivr from client(browser) and encode
+struct RcvFromClient {
+    client: Arc<Mutex<TcpStream>>,
+    remote: Arc<Mutex<TcpStream>>,
+    rd: BytesMut,
+    encrypter: Arc<Mutex<Encypter>>,
+    dst: BytesMut,
+    read_done: bool,
+    res_len: u32,
+}
+
+impl RcvFromClient {
+    fn new(
+        client: Arc<Mutex<TcpStream>>,
+        remote: Arc<Mutex<TcpStream>>,
+        encrypter: Arc<Mutex<Encypter>>,
+        dst: BytesMut,
+    ) -> RcvFromClient {
+        RcvFromClient {
+            client, remote, rd: BytesMut::new(), encrypter, dst, read_done: false, res_len: 0,
+        }
+    }
+}
+
+impl Future for RcvFromCleint {
+    type Item = ();
+    type Error = io::Error;
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error>
+    {
+        loop {
+            if !self.read_done && res_len == 0 {
+                self.rd.reserve(2048);
+                let n = try_ready!(self.client.lock().unwrap().read_buf(&mut self.rd));
+                if n == 0 {
+                    self.read_done = true;
+                } else {
+                    res_len += n;
+                }
+            }
+
+            while res_len != 0 {
+                let mut wd = self.dst.clone();
+                wd.reserve(self.rd.len());
+                wd.put(&self.rd);
+                let mut wd = BytesMut::from(self.encrypter.lock().unwrap().encode(&wd));
+                let n = try_ready!(self.remote.lock().unwrap().poll_write(&wd));
+                assert!(n > 0);
+                
+            }
+            
+        }
+    }
+}
+//---------------------------------------------------//
 struct Transfer {
     client: TcpStream,
     remote: TcpStream,
