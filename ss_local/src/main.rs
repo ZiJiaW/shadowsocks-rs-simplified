@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use ss_local::Encypter;
 use bytes::{BytesMut, BufMut};
 
+use std::iter;
+
 const SS_SERVER_ADDR: &'static str = "127.0.0.1:9002";
 
 #[allow(non_snake_case)]
@@ -31,89 +33,7 @@ enum RqAddr {
 }
 
 // handle message transfer task
-// receive from remote server and decrypt
-struct RcvFromRemote {
-    client: Arc<Mutex<TcpStream>>,
-    remote: Arc<Mutex<TcpStream>>,
-    rd: BytesMut,
-    encrypter: Arc<Mutex<Encypter>>,
-}
 
-impl RcvFromRemote {
-    fn new(
-        client: Arc<Mutex<TcpStream>>,
-        remote: Arc<Mutex<TcpStream>>,
-        encrypter: Arc<Mutex<Encypter>>
-    ) -> RcvFromRemote {
-        RcvFromRemote{
-            client, remote, rd: BytesMut::new(), encrypter,
-        }
-    }
-}
-
-impl Future for RcvFromRemote {
-    type Item = ();
-    type Error = io::Error;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error>
-    {
-
-    }
-}
-
-// receivr from client(browser) and encode
-struct RcvFromClient {
-    client: Arc<Mutex<TcpStream>>,
-    remote: Arc<Mutex<TcpStream>>,
-    rd: BytesMut,
-    encrypter: Arc<Mutex<Encypter>>,
-    dst: BytesMut,
-    read_done: bool,
-    res_len: u32,
-}
-
-impl RcvFromClient {
-    fn new(
-        client: Arc<Mutex<TcpStream>>,
-        remote: Arc<Mutex<TcpStream>>,
-        encrypter: Arc<Mutex<Encypter>>,
-        dst: BytesMut,
-    ) -> RcvFromClient {
-        RcvFromClient {
-            client, remote, rd: BytesMut::new(), encrypter, dst, read_done: false, res_len: 0,
-        }
-    }
-}
-
-impl Future for RcvFromCleint {
-    type Item = ();
-    type Error = io::Error;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error>
-    {
-        loop {
-            if !self.read_done && res_len == 0 {
-                self.rd.reserve(2048);
-                let n = try_ready!(self.client.lock().unwrap().read_buf(&mut self.rd));
-                if n == 0 {
-                    self.read_done = true;
-                } else {
-                    res_len += n;
-                }
-            }
-
-            while res_len != 0 {
-                let mut wd = self.dst.clone();
-                wd.reserve(self.rd.len());
-                wd.put(&self.rd);
-                let mut wd = BytesMut::from(self.encrypter.lock().unwrap().encode(&wd));
-                let n = try_ready!(self.remote.lock().unwrap().poll_write(&wd));
-                assert!(n > 0);
-                
-            }
-            
-        }
-    }
-}
-//---------------------------------------------------//
 struct Transfer {
     client: TcpStream,
     remote: TcpStream,
@@ -284,10 +204,92 @@ fn handle_proxy(client: TcpStream, encrypter: Arc<Mutex<Encypter>>, addr: RqAddr
     -> impl Future<Item = (), Error = io::Error>
 {
     println!("handle proxy now!");
+
+    let header = match addr {
+        RqAddr::IPV4(mut addr) => {
+            addr.insert(0, 0x1);// 0x1 127 0 0 1 0x0 0x50
+            addr// indicate ipv4 addr
+        },
+        RqAddr::NAME(mut addr) => {
+            //println!("addr is {:?}", addr);
+            assert!(addr.len() - 2 <= 255);
+            addr.insert(0, (addr.len() - 2) as u8);// len(u8) www.google.com 0x0 0x50
+            addr// indicate addr length
+        }
+    };
+
     let remote_addr = SS_SERVER_ADDR.parse().unwrap();
 
+    // TcpStream::connect(&remote_addr).and_then(move |remote| {
+    //     Transfer::new(client, remote, encrypter, addr)
+    // })
+    let (client_reader, client_writer) = client.split();
+
+    let encrypter_inner1 = Arc::clone(&encrypter);
+    let encrypter_inner2 = Arc::clone(&encrypter);
+
     TcpStream::connect(&remote_addr).and_then(move |remote| {
-        Transfer::new(client, remote, encrypter, addr)
+
+        let (remote_reader, remote_writer) = remote.split();
+
+        let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
+
+        let client_to_remote = iter.fold((client_reader, remote_writer, header),
+        move |(reader, writer, header), _| {
+            let encrypter = Arc::clone(&encrypter_inner1);
+            io::read(reader, vec![0; 2048])
+            .and_then(move |(reader, buf, len)| {
+                println!("read {} bytes from client;", len);
+                // closed
+                if len == 0 {
+                    Either::A(future::err(io::Error::new(io::ErrorKind::BrokenPipe, "client connection closed!")))
+                } else {
+                    // encapsulate data
+                    let mut data = header.clone();
+                    data.extend(&buf[0..len]);
+                    let data = encrypter.lock().unwrap().encode(&data);
+                    // write to remote server
+                    Either::B(io::write_all(writer, data)
+                    .and_then(move |(writer, _)| {
+                        println!("data sent to remote;");
+                        Ok((reader, writer, header))
+                    }))
+                }
+            })
+        })
+        .map(|_|()).map_err(|_|{
+            println!("connection closed!");
+        });
+
+        let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
+        let remote_to_client = iter.fold((client_writer, remote_reader),
+        move |(writer, reader), _| {
+            let encrypter = Arc::clone(&encrypter_inner2);
+            io::read(reader, vec![0; 2048])
+            .and_then(move |(reader, buf, len)| {
+                println!("read {} bytes from remote server;", len);
+                if len == 0 {
+                    Either::A(future::err(io::Error::new(io::ErrorKind::BrokenPipe, "remote connection closed!")))
+                } else {
+                    let data = encrypter.lock().unwrap().decode(&buf[0..len]);
+                    // write to client
+                    Either::B(io::write_all(writer, data)
+                    .and_then(move |(writer, _)| {
+                        println!("response sent to client!");
+                        Ok((writer, reader))
+                    }))
+                }
+            })
+        })
+        .map(|_|()).map_err(|_|{
+            println!("connection closed!");
+        });
+
+        let proxy = client_to_remote.select(remote_to_client);
+        proxy.then(|_| {
+            println!("proxy end!");
+            Ok(())
+        })
     })
 }
 
@@ -315,11 +317,11 @@ fn main()
 
     let mut newen = Encypter::new();
 
-    let data = BytesMut::from(vec![1,2,3,4,5,6]);
-    let enc = encrypter.lock().unwrap().encode(&data);
-    println!("enc {:?}", enc);
-    let dec = newen.decode(&enc);
-    println!("{:?}", dec);
+    // let data = BytesMut::from(vec![1,2,3,4,5,6]);
+    // let enc = encrypter.lock().unwrap().encode(&data);
+    // println!("enc {:?}", enc);
+    // let dec = newen.decode(&enc);
+    // println!("{:?}", dec);
 
     let local_server = 
     listener.incoming().for_each(move |client| {
