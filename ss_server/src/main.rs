@@ -19,7 +19,7 @@ use trust_dns_resolver::config::*;
 fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
 {
     let resolver_future = ResolverFuture::new(
-        ResolverConfig::default(),
+        ResolverConfig::cloudflare(),
         ResolverOpts::default()
     );
     resolver_future.and_then(move |resolver| {

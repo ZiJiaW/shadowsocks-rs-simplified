@@ -33,7 +33,7 @@ enum RqAddr {
 }
 
 // handle message transfer task
-
+/*
 struct Transfer {
     client: TcpStream,
     remote: TcpStream,
@@ -110,7 +110,7 @@ impl Future for Transfer {
         Ok(Async::Ready(()))
     }
 }
-
+*/
 // hand shake part of socks5 protocol
 fn hand_shake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error>
 {
@@ -265,7 +265,7 @@ fn handle_proxy(client: TcpStream, encrypter: Arc<Mutex<Encypter>>, addr: RqAddr
         let remote_to_client = iter.fold((client_writer, remote_reader),
         move |(writer, reader), _| {
             let encrypter = Arc::clone(&encrypter_inner2);
-            io::read(reader, vec![0; 2048])
+            io::read(reader, vec![0; 10240])
             .and_then(move |(reader, buf, len)| {
                 println!("read {} bytes from remote server;", len);
                 if len == 0 {
@@ -315,26 +315,10 @@ fn main()
 
     let encrypter = Arc::new(Mutex::new(Encypter::new()));
 
-    let mut newen = Encypter::new();
-
-    // let data = BytesMut::from(vec![1,2,3,4,5,6]);
-    // let enc = encrypter.lock().unwrap().encode(&data);
-    // println!("enc {:?}", enc);
-    // let dec = newen.decode(&enc);
-    // println!("{:?}", dec);
-
     let local_server = 
     listener.incoming().for_each(move |client| {
         println!("New connection from: {:?}", client.peer_addr().unwrap());
         process(client, Arc::clone(&encrypter));
-        // let mut buf = BytesMut::new();
-        // buf.reserve(1024);
-        // buf.resize(1024, 0x1);
-        // let a = io::read(client, buf).and_then(|(socket, buf, len)|{
-        //     println!("get data {:?}, len ", buf);
-        //     Ok(())
-        // }).map(|_|{}).map_err(|_|{});
-        // tokio::spawn(a);
         Ok(())
     })
     .map_err(|e| {
