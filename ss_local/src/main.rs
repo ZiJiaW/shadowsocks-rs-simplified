@@ -237,7 +237,7 @@ fn handle_proxy(client: TcpStream, encrypter: Arc<Mutex<Encypter>>, addr: RqAddr
         let client_to_remote = iter.fold((client_reader, remote_writer, header),
         move |(reader, writer, header), _| {
             let encrypter = Arc::clone(&encrypter_inner1);
-            io::read(reader, vec![0; 2048])
+            io::read(reader, vec![0; 10240])
             .and_then(move |(reader, buf, len)| {
                 println!("read {} bytes from client;", len);
                 // closed

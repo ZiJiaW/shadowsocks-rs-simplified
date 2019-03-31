@@ -35,9 +35,10 @@ fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error =
     })
 }
 
+
 fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
 {
-    let process = io::read(socket, vec![0; 2048])
+    let process = io::read(socket, vec![0; 10240])
     .and_then(move |(socket, data, len)| {
         println!("get encrypted data len: {}", len);
         if len == 0 {
@@ -68,24 +69,72 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
                 io::write_all(dst_stream, request_data)
                 .and_then(|(dst_stream, _)| {
                     io::read(dst_stream, vec![0; 10240])
-                    .and_then(|(_, buf, len)| {
+                    .and_then(|(dst_stream, buf, len)| {
                         println!("rcv len is {}", len);
-                        Ok((buf, len))
+                        Ok((dst_stream, buf, len))
                     })
                 })
             })
-            .and_then(move |(buf, len)| {
-                Ok((socket, buf, len, encrypter))
+            .and_then(move |(dst_stream, buf, len)| {
+                Ok((socket, dst_stream, buf, len, encrypter))
             })
         })
         )
     })
-    .and_then(|(socket, buf, len, encrypter)| {
+    .and_then(|(socket, dst_stream, buf, len, encrypter)| {
         let response = encrypter.lock().unwrap().encode(&buf[0..len]);
         io::write_all(socket, response)
-        .and_then(|_|{
+        .and_then(|socket, _|{
             println!("response sent!");
             Ok(())
+            // forward data until connection closed
+            let encrypter_inner1 = Arc::clone(&encrypter);
+            let encrypter_inner2 = Arc::clone(&encrypter);
+
+            let (local_reader, local_writer) = socket.split();
+            let (dst_reader, dst_writer) = dst_stream.split();
+
+            let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
+            let local_to_dst = iter.fold((local_reader, dst_writer), move |(reader, writer), _|{
+                let encrypter = Arc::clone(&encrypter_inner1);
+                io::read(reader, vec![0; 10240])
+                .and_then(|(reader, buf, len)| {
+                    println!("read {} bytes from local server;", len);
+                    if len == 0 {
+                        Either::A(future::err(io::Error::new(io::ErrorKind::BrokenPipe, "remote connection closed!")))
+                    } else {
+                        let mut data = encrypter.lock().unwrap().decode(&buf[0..len]);
+                        let data = match data[0] {
+                            0x1 => {
+                                data.split_off(7)
+                            },
+                            len => {
+                                data.split_off(len + 3)
+                            }
+                        };
+                        Either::B(
+                            io::write_all(writer, data)
+                            .and_then(move |writer, _| {
+                                Ok((reader, writer))
+                            })
+                        )
+                    }
+                })
+            }).map(|_|()).map_err(|_|{
+                println!("connection closed!");
+            });
+
+            let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
+            let dst_to_local = iter.fold((dst_reader, local_writer), move |(reader, writer), _| {
+                let encrypter = Arc::clone(&encrypter_inner2);
+                io::read(reader, vec![10240])
+                .and_then(|(reader, buf, len)| {
+                    // TODO 
+                })
+            }).map(|_|()).map_err(|_|{
+                println!("connection closed!");
+            });
+
         })
     })
     .map_err(|e| {
