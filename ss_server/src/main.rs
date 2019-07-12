@@ -18,6 +18,9 @@ use trust_dns_resolver::config::*;
 
 use std::iter;
 
+const PACKAGE_SIZE: usize = 8196;
+
+// handle dns query
 fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
 {
     let resolver_future = ResolverFuture::new(
@@ -37,130 +40,108 @@ fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error =
     })
 }
 
-
-fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
+// connect target address
+fn handle_connect(local: TcpStream) -> impl Future<Item = (TcpStream, TcpStream), Error = io::Error>
 {
-    let process = io::read(socket, vec![0; 102400])
-    .and_then(move |(socket, data, len)| {
-        println!("get encrypted data len: {}", len);
-        if len == 0 {
-            return Either::A(future::err(io::Error::from(io::ErrorKind::NotConnected)));
-        }
-        let mut data = encrypter.lock().unwrap().decode(&data[0..len]);
-        //println!("get data len: {}", len);
-
-        let (addr_future, request_data) = match data[0] {
+    io::read_exact(local, vec![0u8; 1])
+    .and_then(move |(local, buf)| {
+        match buf[0] {
             0x1 => {
-                let addr = Ipv4Addr::new(data[1], data[2], data[3], data[4]);
-                let port = ((data[5] as u16) << 8) | (data[6] as u16);
-                let data = data.split_off(7);
-                (Either::A(future::ok::<SocketAddr, io::Error>(SocketAddr::new(IpAddr::V4(addr), port))), data)
+                Either::A(io::read_exact(local, vec![0u8; 6])
+                .and_then(|(local, buf)| {
+                    let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                    let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
+                    let dst_addr = SocketAddr::new(IpAddr::V4(ip), port);
+                    TcpStream::connect(&dst_addr).and_then(move |dst| {
+                        Ok((local, dst))
+                    })
+                }))
             },
             length => {
                 let length = length as usize;
-                let port = ((data[length + 1] as u16) << 8) | (data[length + 2] as u16);
-                let addr = String::from_utf8_lossy(&data[1..(length+1)]).to_string();
-                println!("query address: {}", addr);
-                let data = data.split_off(length + 3);
-                (Either::B(query_addr(addr, port)), data)
-            }
-        };
-        Either::B(
-        addr_future.and_then(|dst_addr| {
-            TcpStream::connect(&dst_addr).and_then(move |dst_stream| {
-                io::write_all(dst_stream, request_data)
-                .and_then(|(dst_stream, _)| {
-                    io::read(dst_stream, vec![0; 102400])
-                    .and_then(|(dst_stream, buf, len)| {
-                        println!("rcv len is {}", len);
-                        Ok((dst_stream, buf, len))
+                Either::B(io::read_exact(local, vec![0u8; length + 2])
+                .and_then(move |(local, buf)| {
+                    let port = ((buf[length] as u16) << 8) | (buf[length + 1] as u16);
+                    let addr = String::from_utf8_lossy(&buf[0..length]).to_string();
+                    println!("connecting: {}", addr);
+                    query_addr(addr, port).and_then(move |dst_addr| {
+                        TcpStream::connect(&dst_addr).and_then(move |dst| {
+                            Ok((local, dst))
+                        })
                     })
-                })
-            })
-            .and_then(move |(dst_stream, buf, len)| {
-                Ok((socket, dst_stream, buf, len, encrypter))
-            })
-        })
-        )
+                }))
+            }
+        }
     })
-    .and_then(|(socket, dst_stream, buf, len, encrypter)| {
-        let response = encrypter.lock().unwrap().encode(&buf[0..len]);
-        io::write_all(socket, response)
-        .and_then(move |(socket, _)|{
-            //println!("response sent!");
-            //Ok(())
-            // forward data until connection closed
-            let encrypter_inner1 = Arc::clone(&encrypter);
-            let encrypter_inner2 = Arc::clone(&encrypter);
+}
 
-            let (local_reader, local_writer) = socket.split();
-            let (dst_reader, dst_writer) = dst_stream.split();
+// handle data transfer
+fn handle_proxy(local: TcpStream, dst: TcpStream, encrypter: Arc<Mutex<Encypter>>)
+    -> impl Future<Item = (), Error = io::Error>
+{
+    let (local_reader, local_writer) = local.split();
+    let (dst_reader, dst_writer) = dst.split();
+    let encrypter_inner1 = Arc::clone(&encrypter);
+    let encrypter_inner2 = Arc::clone(&encrypter);
 
-            let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
-            let local_to_dst = iter.fold((local_reader, dst_writer), move |(reader, writer), _|{
-                let encrypter = Arc::clone(&encrypter_inner1);
-                io::read(reader, vec![0; 102400])
-                .and_then(move |(reader, buf, len)| {
-                    println!("read {} bytes from local server;", len);
-                    if len == 0 {
-                        Either::A(future::err(io::Error::new(io::ErrorKind::BrokenPipe, "remote connection closed!")))
-                    } else {
-                        let mut data = encrypter.lock().unwrap().decode(&buf[0..len]);
-                        let data = match data[0] {
-                            0x1 => {
-                                data.split_off(7)
-                            },
-                            len => {
-                                data.split_off(len as usize + 3)
-                            }
-                        };
-                        Either::B(
-                            io::write_all(writer, data)
-                            .and_then(move |(writer, _)| {
-                                Ok((reader, writer))
-                            })
-                        )
-                    }
+    let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
+    let local_to_dst = iter.fold((local_reader, dst_writer), move |(reader, writer), _| {
+        let encrypter = Arc::clone(&encrypter_inner1);
+        io::read_exact(reader, vec![0u8; 2])
+        .and_then(move |(reader, buf)| {
+            let len: usize = ((buf[1] as usize) << 8) | (buf[0] as usize);
+            io::read_exact(reader, vec![0u8; len])
+            .and_then(move |(reader, buf)| {
+                let data = encrypter.lock().unwrap().decode(&buf[0..len]);
+                io::write_all(writer, data).and_then(move|(writer, _)| {
+                    Ok((reader, writer))
                 })
-            }).map(|_|()).map_err(|_|{
-                println!("connection closed!");
-            });
-
-            let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
-            let dst_to_local = iter.fold((dst_reader, local_writer), move |(reader, writer), _| {
-                let encrypter = Arc::clone(&encrypter_inner2);
-                io::read(reader, vec![0; 102400])
-                .and_then(move |(reader, buf, len)| {
-                    // TODO 
-                    println!("read {} bytes from dst site;", len);
-                    if len == 0 {
-                        Either::A(future::err(io::Error::new(io::ErrorKind::BrokenPipe, "remote connection closed!")))
-                    } else {
-                        let data = encrypter.lock().unwrap().encode(&buf[0..len]);
-                        Either::B(
-                            io::write_all(writer, data)
-                            .and_then(move |(writer, _)| {
-                                Ok((reader, writer))
-                            })
-                        )
-                    }
-                })
-            }).map(|_|()).map_err(|_|{
-                println!("connection closed!");
-            });
-
-            let data_forward = local_to_dst.select(dst_to_local);
-            data_forward.then(|_|{
-                println!("data forward end!");
-                Ok(())
             })
-
         })
+    }).map(|_|()).map_err(|_|{
+        println!("browser client connection closed!");
+    });
+
+    let iter = stream::iter_ok::<_, io::Error>(iter::repeat(()));
+    let dst_to_local = iter.fold((dst_reader, local_writer), move |(reader, writer), _| {
+        let encrypter = Arc::clone(&encrypter_inner2);
+        io::read(reader, vec![0u8; PACKAGE_SIZE]).and_then(move |(reader, buf, len)| {
+            //println!("read {} bytes from dst;", len);
+            if len == 0 {
+                Either::A(future::err(io::Error::new(io::ErrorKind::BrokenPipe, "dst connection closed!")))
+            } else {
+                let mut data: Vec<u8> = encrypter.lock().unwrap().encode(&buf[0..len]);
+                let len = data.len().to_le_bytes();
+                data.insert(0, len[1]);
+                data.insert(0, len[0]);
+                Either::B(io::write_all(writer, data).and_then(move |(writer, _)| {
+                    Ok((reader, writer))
+                }))
+            }
+        })
+    }).map(|_|()).map_err(|_|{
+        println!("browser client connection closed!");
+    });
+
+    let proxy = local_to_dst.select(dst_to_local);
+    proxy.then(|_| {
+        println!("proxy end!");
+        Ok(())
+    })
+}
+
+
+// main processing logic
+fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
+{
+    let handler = handle_connect(socket)
+    .and_then(move |(local, dst)| {
+        handle_proxy(local, dst, encrypter)
     })
     .map_err(|e| {
-        println!("Error happened when fetching data: {:?}", e);
+        println!("Error happened in processing: {:?}", e);
     });
-    tokio::spawn(process);
+    tokio::spawn(handler);
 }
 
 fn main() {
