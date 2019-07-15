@@ -10,8 +10,9 @@ use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::net::{Ipv4Addr, IpAddr, SocketAddr};
+use std::collections::HashMap;
 
 use trust_dns_resolver::ResolverFuture;
 use trust_dns_resolver::config::*;
@@ -41,7 +42,7 @@ fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error =
 }
 
 // connect target address
-fn handle_connect(local: TcpStream) -> impl Future<Item = (TcpStream, TcpStream), Error = io::Error>
+fn handle_connect(local: TcpStream, dns_map: Arc<RwLock<HashMap<String, IpAddr>>>) -> impl Future<Item = (TcpStream, TcpStream), Error = io::Error>
 {
     io::read_exact(local, vec![0u8; 1])
     .and_then(move |(local, buf)| {
@@ -64,11 +65,25 @@ fn handle_connect(local: TcpStream) -> impl Future<Item = (TcpStream, TcpStream)
                     let port = ((buf[length] as u16) << 8) | (buf[length + 1] as u16);
                     let addr = String::from_utf8_lossy(&buf[0..length]).to_string();
                     println!("connecting: {}", addr);
-                    query_addr(addr, port).and_then(move |dst_addr| {
-                        TcpStream::connect(&dst_addr).and_then(move |dst| {
+                    let read_map = dns_map.read().unwrap();
+                    if read_map.contains_key(&addr)
+                    {
+                        let ip = read_map.get(&addr).unwrap();
+                        let dst_addr = SocketAddr::new(ip.clone(), port);
+                        Either::A(TcpStream::connect(&dst_addr).and_then(move |dst| {
                             Ok((local, dst))
-                        })
-                    })
+                        }))
+                    }
+                    else
+                    {
+                        drop(read_map);
+                        Either::B(query_addr(addr.clone(), port).and_then(move |dst_addr| {
+                            dns_map.write().unwrap().insert(addr, dst_addr.ip());
+                            TcpStream::connect(&dst_addr).and_then(move |dst| {
+                                Ok((local, dst))
+                            })
+                        }))
+                    } 
                 }))
             }
         }
@@ -132,9 +147,9 @@ fn handle_proxy(local: TcpStream, dst: TcpStream, encrypter: Arc<Mutex<Encypter>
 
 
 // main processing logic
-fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>)
+fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>, dns_map: Arc<RwLock<HashMap<String, IpAddr>>>)
 {
-    let handler = handle_connect(socket)
+    let handler = handle_connect(socket, dns_map)
     .and_then(move |(local, dst)| {
         handle_proxy(local, dst, encrypter)
     })
@@ -148,11 +163,12 @@ fn main() {
     let encrypter = Arc::new(Mutex::new(Encypter::new()));
     let addr = "127.0.0.1:9002".parse().unwrap();
     let listener = TcpListener::bind(&addr).unwrap();
+    let dns_map = Arc::new(RwLock::new(HashMap::new()));
 
     let remote_server = 
     listener.incoming().for_each(move |socket| {
         println!("new client {:?}!", socket.peer_addr().unwrap());
-        process(socket, Arc::clone(&encrypter));
+        process(socket, Arc::clone(&encrypter), Arc::clone(&dns_map));
         Ok(())
     })
     .map_err(|e| {
