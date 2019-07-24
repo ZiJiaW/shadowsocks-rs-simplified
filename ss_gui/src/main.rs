@@ -2,6 +2,7 @@ extern crate tokio;
 #[macro_use]
 extern crate futures;
 extern crate trust_dns_resolver;
+extern crate trust_dns;
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
@@ -14,6 +15,14 @@ use std::net::*;
 use tokio::runtime::current_thread::Runtime;
 use trust_dns_resolver::ResolverFuture;
 use trust_dns_resolver::config::*;
+
+use trust_dns::client::{Client, ClientConnection, ClientStreamHandle, SyncClient};
+use trust_dns::udp::UdpClientConnection;
+
+use std::net::Ipv4Addr;
+use std::str::FromStr;
+use trust_dns::op::DnsResponse;
+use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
 
 struct ReadAll {
     socket: TcpStream,
@@ -52,42 +61,66 @@ impl Future for ReadAll {
 }
 
 fn main() {
-    let addr = "127.0.0.1:9000".parse().unwrap();
-    let listener = TcpListener::bind(&addr).unwrap();
+    // let addr = "127.0.0.1:9000".parse().unwrap();
+    // let listener = TcpListener::bind(&addr).unwrap();
 
-    let remote_server = 
-    listener.incoming().for_each(move |socket| {
-        println!("new client {:?}!", socket.peer_addr().unwrap());
-        let pro = 
-        io::read(socket, vec![0; 200]).and_then(|(socket, data, len)| {
-            println!("{}", len);
-            println!("data: {:?}", String::from_utf8(data).unwrap());
+    // let remote_server = 
+    // listener.incoming().for_each(move |socket| {
+    //     println!("new client {:?}!", socket.peer_addr().unwrap());
+    //     let pro = 
+    //     io::read(socket, vec![0; 200]).and_then(|(socket, data, len)| {
+    //         println!("{}", len);
+    //         println!("data: {:?}", String::from_utf8(data).unwrap());
             
-            let resolver = ResolverFuture::new(
-                ResolverConfig::default(),
-                ResolverOpts::default()
-            );
-            resolver.and_then(|resolver| {
-                resolver.lookup_ip("www.baidu.com")
-            })
-            .and_then(|ips| {
-                let ip = ips.iter().next().unwrap();
-                println!("ip: {:?}", ip);
-                Ok(())
-            })
-            .map_err(|_| {io::Error::from(io::ErrorKind::InvalidData)})
-        })
-        .map_err(|e| { println!("Error happened in serving: {:?}", e); });
+    //         let resolver = ResolverFuture::new(
+    //             ResolverConfig::default(),
+    //             ResolverOpts::default()
+    //         );
+    //         resolver.and_then(|resolver| {
+    //             resolver.lookup_ip("www.baidu.com")
+    //         })
+    //         .and_then(|ips| {
+    //             let ip = ips.iter().next().unwrap();
+    //             println!("ip: {:?}", ip);
+    //             Ok(())
+    //         })
+    //         .map_err(|_| {io::Error::from(io::ErrorKind::InvalidData)})
+    //     })
+    //     .map_err(|e| { println!("Error happened in serving: {:?}", e); });
 
 
-        tokio::spawn(pro);
+    //     tokio::spawn(pro);
 
 
 
-        //tokio::spawn(ReadAll::new(socket).map_err(|e|{println!("error happened!");}));
-        Ok(())
-    })
-    .map_err(|e| { println!("Error happened in serving: {:?}", e); });
-    println!("Server listening on {:?}", addr);
-    tokio::run(remote_server);
+    //     //tokio::spawn(ReadAll::new(socket).map_err(|e|{println!("error happened!");}));
+    //     Ok(())
+    // })
+    // .map_err(|e| { println!("Error happened in serving: {:?}", e); });
+    // println!("Server listening on {:?}", addr);
+    // tokio::run(remote_server);
+
+
+    let address = "114.114.114.114:53".parse().unwrap();
+    let conn = UdpClientConnection::new(address).unwrap();
+
+    let client = SyncClient::new(conn);
+
+    let name = Name::from_str("www.baidu.com.").unwrap();
+    let response = client.query(&name, DNSClass::IN, RecordType::A).unwrap();
+
+    let answers = response.answers();
+
+    let mut fip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));;
+    for r in answers
+    {
+        println!("{:?}", r.rdata().to_record_type());
+        if r.rdata().to_record_type() == RecordType::A
+        if let Some(ip) = r.rdata().to_ip_addr() {
+            println!("{:?}",ip);
+            fip = ip;
+        }
+    };
+
+    println!("final ip {:?}", fip);
 }

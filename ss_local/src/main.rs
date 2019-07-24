@@ -247,7 +247,7 @@ fn main()
 
     let encrypter = Arc::new(Mutex::new(Encypter::new()));
 
-    let local_server = 
+    let local_server =
     listener.incoming().for_each(move |client| {
         println!("New connection from: {:?}", client.peer_addr().unwrap());
         process(client, Arc::clone(&encrypter));

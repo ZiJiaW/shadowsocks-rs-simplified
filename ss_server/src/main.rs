@@ -1,6 +1,7 @@
 extern crate tokio;
 extern crate futures;
 extern crate trust_dns_resolver;
+extern crate trust_dns;
 
 use ss_local::Encypter;
 
@@ -17,6 +18,10 @@ use std::collections::HashMap;
 use trust_dns_resolver::ResolverFuture;
 use trust_dns_resolver::config::*;
 
+use trust_dns::client::{Client, ClientConnection, SyncClient};
+use trust_dns::udp::UdpClientConnection;
+use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
+
 use std::iter;
 
 const PACKAGE_SIZE: usize = 8196;
@@ -24,8 +29,10 @@ const PACKAGE_SIZE: usize = 8196;
 // handle dns query
 fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
 {
+    println!("query address: {}", addr);
     let resolver_future = ResolverFuture::new(
         ResolverConfig::cloudflare(),
+        //ResolverConfig::default(),
         ResolverOpts::default()
     );
     resolver_future.and_then(move |resolver| {
@@ -33,6 +40,7 @@ fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error =
     })
     .and_then(move |ips| {
         let ip = ips.iter().next().unwrap();
+        println!("{:?}",ip);
         Ok(SocketAddr::new(ip, port))
     })
     .map_err(|e| {
@@ -41,8 +49,26 @@ fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error =
     })
 }
 
+fn query_addr2(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
+{
+    // initialize client
+    let address = "114.114.114.114:53".parse().unwrap();
+    let conn = UdpClientConnection::new(address).unwrap();
+    let client = SyncClient::new(conn);
+    // connect address
+    addr.push('.');
+    let name = Name::from_str(&addr[..]).unwrap();
+    let response = client.query(&name, DNSClass::IN, RecordType::A).unwrap();
+    let answers = response.answers();
+    // get ipv4 addr
+
+
+
+}
+
 // connect target address
-fn handle_connect(local: TcpStream, dns_map: Arc<RwLock<HashMap<String, IpAddr>>>) -> impl Future<Item = (TcpStream, TcpStream), Error = io::Error>
+fn handle_connect(local: TcpStream, dns_map: Arc<RwLock<HashMap<String, IpAddr>>>)
+    -> impl Future<Item = (TcpStream, TcpStream), Error = io::Error>
 {
     io::read_exact(local, vec![0u8; 1])
     .and_then(move |(local, buf)| {
@@ -68,6 +94,7 @@ fn handle_connect(local: TcpStream, dns_map: Arc<RwLock<HashMap<String, IpAddr>>
                     let read_map = dns_map.read().unwrap();
                     if read_map.contains_key(&addr)
                     {
+                        println!("addr {} has been found", addr);
                         let ip = read_map.get(&addr).unwrap();
                         let dst_addr = SocketAddr::new(ip.clone(), port);
                         Either::A(TcpStream::connect(&dst_addr).and_then(move |dst| {
@@ -78,6 +105,7 @@ fn handle_connect(local: TcpStream, dns_map: Arc<RwLock<HashMap<String, IpAddr>>
                     {
                         drop(read_map);
                         Either::B(query_addr(addr.clone(), port).and_then(move |dst_addr| {
+                            println!("saved addr {} is {:?}", addr,  dst_addr.ip());
                             dns_map.write().unwrap().insert(addr, dst_addr.ip());
                             TcpStream::connect(&dst_addr).and_then(move |dst| {
                                 Ok((local, dst))

@@ -9,3 +9,4 @@ ss_local = {path = "../ss_local"}
 tokio = "0.1"
 futures = "0.1"
 trust-dns-resolver = "^0.9"
+trust-dns = "^0.14"
