@@ -9,8 +9,11 @@ So far I've finished most of it, including a local server and a remote server. C
 ## Dependencies
 
 tokio = "0.1"
+
 futures = "0.1"
+
 openssl = "0.10" // In Windows you should install OpenSSL-win and add it to Path
+
 trust-dns = "0.16"
 
 ## Structure
