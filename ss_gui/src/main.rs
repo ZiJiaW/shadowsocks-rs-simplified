@@ -16,13 +16,15 @@ use tokio::runtime::current_thread::Runtime;
 use trust_dns_resolver::ResolverFuture;
 use trust_dns_resolver::config::*;
 
-use trust_dns::client::{Client, ClientConnection, ClientStreamHandle, SyncClient};
+use trust_dns::client::{Client, ClientConnection, ClientStreamHandle, SyncClient, ClientFuture, ClientHandle};
 use trust_dns::udp::UdpClientConnection;
+use trust_dns::udp::UdpClientStream;
 
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use trust_dns::op::DnsResponse;
 use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
+use trust_dns::rr::rdata::key::KEY;
 
 struct ReadAll {
     socket: TcpStream,
@@ -61,66 +63,69 @@ impl Future for ReadAll {
 }
 
 fn main() {
-    // let addr = "127.0.0.1:9000".parse().unwrap();
-    // let listener = TcpListener::bind(&addr).unwrap();
+    let addr = "127.0.0.1:9000".parse().unwrap();
+    let listener = TcpListener::bind(&addr).unwrap();
 
-    // let remote_server = 
-    // listener.incoming().for_each(move |socket| {
-    //     println!("new client {:?}!", socket.peer_addr().unwrap());
-    //     let pro = 
-    //     io::read(socket, vec![0; 200]).and_then(|(socket, data, len)| {
-    //         println!("{}", len);
-    //         println!("data: {:?}", String::from_utf8(data).unwrap());
-            
-    //         let resolver = ResolverFuture::new(
-    //             ResolverConfig::default(),
-    //             ResolverOpts::default()
-    //         );
-    //         resolver.and_then(|resolver| {
-    //             resolver.lookup_ip("www.baidu.com")
-    //         })
-    //         .and_then(|ips| {
-    //             let ip = ips.iter().next().unwrap();
-    //             println!("ip: {:?}", ip);
-    //             Ok(())
-    //         })
-    //         .map_err(|_| {io::Error::from(io::ErrorKind::InvalidData)})
-    //     })
-    //     .map_err(|e| { println!("Error happened in serving: {:?}", e); });
+    let remote_server = 
+    listener.incoming().for_each(move |socket| {
+        println!("new client {:?}!", socket.peer_addr().unwrap());
+            //let mut runtime = Runtime::new().unwrap();
+        let stream = UdpClientStream::new(([114,114,114,114], 53).into());
+        let (bg, mut client) = ClientFuture::connect(stream);
+        tokio::spawn(bg);
+        println!("bg spawned!");
+        let query = client.query(Name::from_str("www.baidu.com.").unwrap(), DNSClass::IN, RecordType::A);
+
+        println!("111");
+        // let response = query.wait().unwrap();
+        // println!("222");
+        // if let &RData::A(addr) = response.answers()[1].rdata() {
+        //     println!("{:?}", addr);
+        //     //assert_eq!(addr, Ipv4Addr::new(93, 184, 216, 34));
+        // }
+
+        let pro = query.and_then(|response| {
+            println!("ok");
+            if let &RData::A(addr) = response.answers()[1].rdata() {
+                println!("{:?}", addr);
+                //assert_eq!(addr, Ipv4Addr::new(93, 184, 216, 34));
+            }
+            Ok(())
+        }).map_err(|_|{});
+
+        tokio::spawn(pro);
+        Ok(())
+    })
+    .map_err(|e| { println!("Error happened in serving: {:?}", e); });
+    println!("Server listening on {:?}", addr);
+    tokio::run(remote_server);
+
+    // sync use-------------------------------------------
 
 
-    //     tokio::spawn(pro);
+    // let address = "114.114.114.114:53".parse().unwrap();
+    // let conn = UdpClientConnection::new(address).unwrap();
 
+    // let client = SyncClient::new(conn);
 
+    // let name = Name::from_str("www.baidu.com.").unwrap();
+    // let response = client.query(&name, DNSClass::IN, RecordType::A).unwrap();
 
-    //     //tokio::spawn(ReadAll::new(socket).map_err(|e|{println!("error happened!");}));
-    //     Ok(())
-    // })
-    // .map_err(|e| { println!("Error happened in serving: {:?}", e); });
-    // println!("Server listening on {:?}", addr);
-    // tokio::run(remote_server);
+    // let answers = response.answers();
 
+    // let mut fip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    // for r in answers
+    // {
+    //     if r.rdata().to_record_type() == RecordType::A {
+    //         if let Some(ip) = r.rdata().to_ip_addr() {
+    //             fip = ip;
+    //             break;
+    //         }
+    //     }
+    // };
 
-    let address = "114.114.114.114:53".parse().unwrap();
-    let conn = UdpClientConnection::new(address).unwrap();
+    // println!("final ip {:?}", fip);
 
-    let client = SyncClient::new(conn);
+    // async dns with tokio
 
-    let name = Name::from_str("www.baidu.com.").unwrap();
-    let response = client.query(&name, DNSClass::IN, RecordType::A).unwrap();
-
-    let answers = response.answers();
-
-    let mut fip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));;
-    for r in answers
-    {
-        println!("{:?}", r.rdata().to_record_type());
-        if r.rdata().to_record_type() == RecordType::A
-        if let Some(ip) = r.rdata().to_ip_addr() {
-            println!("{:?}",ip);
-            fip = ip;
-        }
-    };
-
-    println!("final ip {:?}", fip);
 }

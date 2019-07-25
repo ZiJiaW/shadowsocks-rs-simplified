@@ -1,6 +1,5 @@
 extern crate tokio;
 extern crate futures;
-extern crate trust_dns_resolver;
 extern crate trust_dns;
 
 use ss_local::Encypter;
@@ -15,54 +14,38 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::net::{Ipv4Addr, IpAddr, SocketAddr};
 use std::collections::HashMap;
 
-use trust_dns_resolver::ResolverFuture;
-use trust_dns_resolver::config::*;
-
-use trust_dns::client::{Client, ClientConnection, SyncClient};
-use trust_dns::udp::UdpClientConnection;
-use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
+use trust_dns::client::{ClientFuture, ClientHandle};
+use trust_dns::rr::{DNSClass, Name, RecordType};
+use std::str::FromStr;
+use trust_dns::udp::UdpClientStream;
 
 use std::iter;
 
 const PACKAGE_SIZE: usize = 8196;
 
-// handle dns query
-fn query_addr(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
-{
-    println!("query address: {}", addr);
-    let resolver_future = ResolverFuture::new(
-        ResolverConfig::cloudflare(),
-        //ResolverConfig::default(),
-        ResolverOpts::default()
-    );
-    resolver_future.and_then(move |resolver| {
-        resolver.lookup_ip(&addr[..])
-    })
-    .and_then(move |ips| {
-        let ip = ips.iter().next().unwrap();
-        println!("{:?}",ip);
-        Ok(SocketAddr::new(ip, port))
-    })
-    .map_err(|e| {
-        println!("dns error: {:?}",e);
-        io::Error::new(io::ErrorKind::InvalidData, "Query DNS Error!")
-    })
-}
-
-fn query_addr2(addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
+//handle dns query
+fn query_addr2(mut addr: String, port: u16) -> impl Future<Item = SocketAddr, Error = io::Error>
 {
     // initialize client
-    let address = "114.114.114.114:53".parse().unwrap();
-    let conn = UdpClientConnection::new(address).unwrap();
-    let client = SyncClient::new(conn);
-    // connect address
+    let stream = UdpClientStream::new(([114,114,114,114], 53).into());
+    let (bg, mut client) = ClientFuture::connect(stream);
+    tokio::spawn(bg);
     addr.push('.');
-    let name = Name::from_str(&addr[..]).unwrap();
-    let response = client.query(&name, DNSClass::IN, RecordType::A).unwrap();
-    let answers = response.answers();
-    // get ipv4 addr
+    // get response future
+    let query = client.query(Name::from_str(&addr[..]).unwrap(), DNSClass::IN, RecordType::A);
 
+    query.and_then(move |response| {
+        let answers = response.answers();
+        let ip = answers.iter().filter(|r| {
+            r.rdata().to_record_type() == RecordType::A
+        }).map(|r| {
+            r.rdata().to_ip_addr().unwrap()
+        }).next().unwrap();
 
+        Ok(SocketAddr::new(ip, port))
+    }).map_err(|_| {
+        io::Error::new(io::ErrorKind::Other, "Query DNS Error!")
+    })
 
 }
 
@@ -104,7 +87,7 @@ fn handle_connect(local: TcpStream, dns_map: Arc<RwLock<HashMap<String, IpAddr>>
                     else
                     {
                         drop(read_map);
-                        Either::B(query_addr(addr.clone(), port).and_then(move |dst_addr| {
+                        Either::B(query_addr2(addr.clone(), port).and_then(move |dst_addr| {
                             println!("saved addr {} is {:?}", addr,  dst_addr.ip());
                             dns_map.write().unwrap().insert(addr, dst_addr.ip());
                             TcpStream::connect(&dst_addr).and_then(move |dst| {
