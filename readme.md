@@ -18,22 +18,23 @@ trust-dns = "0.16"
 
 ## Structure
 
-1. ss_local: local server
-2. ss_server: remote server
+1. ss_local: local server (listening on 7962 port)
+2. ss_server: remote server (listening on 9002 port)
 3. ss_gui: not implemented yet...
 
 ## Test
 
 Just clone this repo and then in console:
 
-1. cargo run -p ss_local // listen on 7962 port
-2. cargo run -p ss_server// listen on 9002 port
+```bash
+cargo run -p ss_local
+cargo run -p ss_server
+```
 
 You can change the source code to customize your application, including port, DNS address, etc. I haven't provided configuration method yet(maybe later...).
 
-Cause shadowsocks proxy is based on Sock5, you can use Chrome extension [TunnelSwitch](https://chrome.google.com/webstore/detail/tunnelswitch/nfpphleklkamlblagdkbkomjmaedanoh) to provide socks5 proxy in Chrome (set proxy server as 127.0
-.0.1:7962).
+Cause shadowsocks is based on Sock5 proxy, you can use Chrome extension [TunnelSwitch](https://chrome.google.com/webstore/detail/tunnelswitch/nfpphleklkamlblagdkbkomjmaedanoh) to provide socks5 client in Chrome (set proxy server as 127.0.0.1:7962).
 
-As for actual use, more tests should be done. 
+As for actual use, more tests should be done.
 
 Currently this project is just a practice for Rust programming.
