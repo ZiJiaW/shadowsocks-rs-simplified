@@ -6,8 +6,9 @@ use ss_local::Encypter;
 
 use futures::future::{Either};
 
-use tokio::io;
+use tokio::io::{self, AsyncReadExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::stream::StreamExt;
 use tokio::prelude::*;
 
 use std::sync::{Arc, Mutex, RwLock};
@@ -20,6 +21,8 @@ use std::str::FromStr;
 use trust_dns::udp::UdpClientStream;
 
 use std::iter;
+use trust_dns::proto::tcp::TcpStream;
+use futures::AsyncReadExt;
 
 const PACKAGE_SIZE: usize = 8196;
 
@@ -170,21 +173,33 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>, dns_map: Arc<RwLo
     tokio::spawn(handler);
 }
 
-fn main() {
-    let encrypter = Arc::new(Mutex::new(Encypter::new()));
-    let addr = "127.0.0.1:9002".parse().unwrap();
-    let listener = TcpListener::bind(&addr).unwrap();
-    let dns_map = Arc::new(RwLock::new(HashMap::new()));
 
-    let remote_server = 
-    listener.incoming().for_each(move |socket| {
-        println!("new client {:?}!", socket.peer_addr().unwrap());
-        process(socket, Arc::clone(&encrypter), Arc::clone(&dns_map));
-        Ok(())
-    })
-    .map_err(|e| {
-        println!("Error happened in serving: {:?}", e);
-    });
-    println!("Server listening on {:?}", addr);
-    tokio::run(remote_server);
+fn run(mut socket: TcpStream, encrypter: Arc<Mutex<Encypter>>, dns_map: Arc<RwLock<HashMap<String, IpAddr>>>) -> io::Result<()>
+{
+    let mut buf = vec![0; 1];
+    socket.read_exact(&mut buf).await?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    let addr = "127.0.0.1:9002";
+    let encrypter = Arc::new(Mutex::new(Encypter::new()));
+    let dns_map = Arc::new(RwLock::new(HashMap::new()));
+    let mut listener = TcpListener::bind(addr).await.unwrap();
+    let server = async move {
+        loop {
+            match listener.accept().await {
+                Ok((mut socket, _)) => {
+                    tokio::spawn(async move {
+                        run(socket, encrypter.clone(), dns_map.clone());
+                    });
+                },
+                Err(e) => println!("Error happened when accepting: {:?}", e),
+            }
+        }
+    };
+    println!("Server listening on {}", addr);
+    server.await;
 }
