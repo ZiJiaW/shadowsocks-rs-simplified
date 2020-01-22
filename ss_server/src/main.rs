@@ -4,10 +4,10 @@ extern crate trust_dns;
 
 use ss_local::Encypter;
 
-use futures::future::{Either};
+use futures::future::{Either, FutureExt, Future};
 
 use tokio::io::{self, AsyncReadExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, lookup_host};
 use tokio::stream::StreamExt;
 use tokio::prelude::*;
 
@@ -21,8 +21,8 @@ use std::str::FromStr;
 use trust_dns::udp::UdpClientStream;
 
 use std::iter;
-use trust_dns::proto::tcp::TcpStream;
 use futures::AsyncReadExt;
+use trust_dns::tcp::TcpStream;
 
 const PACKAGE_SIZE: usize = 8196;
 
@@ -176,8 +176,45 @@ fn process(socket: TcpStream, encrypter: Arc<Mutex<Encypter>>, dns_map: Arc<RwLo
 
 fn run(mut socket: TcpStream, encrypter: Arc<Mutex<Encypter>>, dns_map: Arc<RwLock<HashMap<String, IpAddr>>>) -> io::Result<()>
 {
-    let mut buf = vec![0; 1];
+    let mut buf = vec![0u8; 1];
     socket.read_exact(&mut buf).await?;
+    let dst: TcpStream = match buf[0] {
+        0x1 => {
+            let mut buf = vec![0u8; 6];
+            socket.read_exact(&mut buf).await?;
+            let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+            let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
+            let dst_address = SocketAddr::new(IpAddr::V4(ip), port);
+            TcpStream::connect(dst_address).await?
+        },
+        length => {
+            let mut buf = vec![0u8, length as usize + 2];
+            socket.read_exact(&mut buf).await?;
+            let port = ((buf[length] as u16) << 8) | (buf[length + 1] as u16);
+            let mut address = String::from_utf8_lossy(&buf[0..length]).to_string();
+            println!("connecting: {}", addr);
+            if dns_map.read().unwrap().contains_key(&address) {
+                println!("address {} has been found", addr);
+                let ip = dns_map.read().unwrap().get(&addr).unwrap();
+                let dst_address = SocketAddr::new(ip.clone(), port);
+                TcpStream::connect(dst_address).await?
+            } else {
+                address = address + ":" + &port.to_string();
+                let dst_addresses = lookup_host(address).await?;
+                let dst_address = dst_addresses.next()?;
+                println!("saved address {} is {:?}", address,  dst_address.ip());
+                dns_map.write().unwrap().insert(address, dst_address.ip());
+                TcpStream::connect(&dst_address).await?
+            }
+        }
+    };
+
+    let (local_reader, local_writer) = socket.split();
+    let (dst_reader, dst_writer) = dst.split();
+
+
+
+
 
     Ok(())
 }
