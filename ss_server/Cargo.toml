@@ -6,6 +6,5 @@ edition = "2018"
 
 [dependencies]
 ss_local = {path = "../ss_local"}
-tokio = { version = "0.2.9", features = ["full"] }
+tokio = { version = "0.2.10", features = ["full"] }
 futures = "0.3"
-trust-dns = "0.16"
