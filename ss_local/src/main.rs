@@ -240,23 +240,74 @@ fn process(client: TcpStream, encrypter: Arc<Mutex<Encypter>>)
 }
 
 
-fn main()
-{
-    let addr = "127.0.0.1:7962".parse().unwrap();
-    let listener = TcpListener::bind(&addr).unwrap();
+//fn main()
+//{
+//    let addr = "127.0.0.1:7962".parse().unwrap();
+//    let listener = TcpListener::bind(&addr).unwrap();
+//
+//    let encrypter = Arc::new(Mutex::new(Encypter::new()));
+//
+//    let local_server =
+//    listener.incoming().for_each(move |client| {
+//        println!("New connection from: {:?}", client.peer_addr().unwrap());
+//        process(client, Arc::clone(&encrypter));
+//        Ok(())
+//    })
+//    .map_err(|e| {
+//        println!("Error happened in serving: {:?}", e);
+//    });
+//
+//    println!("Server listening on {:?}", addr);
+//    tokio::run(local_server);
+//}
 
+async fn run(client: TcpStream, encrypter: Arc<Mutex<Encypter>>) -> io::Result<()>
+{
+    let mut buf = vec![0u8; 2];
+    client.read_exact(&mut buf).await?;
+    let mut len = 0;
+    if buf[0] != Socks5::VER {
+        println!("addr {:?} socks version is {}!", socket.peer_addr().unwrap(), buf[0]);
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Wrong version!"));
+    } else {
+        //println!("version ok!");
+        len = buf[1] as usize;
+    }
+    buf.resize(len, 0u8);
+    client.read_exact(&mut buf).await?;
+    if buf.iter().find(|&&x| x == Socks5::AUTH).is_none() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Wrong auth type!"));
+    }
+    client.write_all(vec![Socks5::VER, Socks5::AUTH]).await?;
+    buf.resize(3, 0u8);
+    client.read_exact(&mut buf).await?;
+    if buf[0] != Socks5::VER {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Wrong version!"));
+    } else if buf[1] != Socks5::CMD_TCP {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "No UDP support!"));
+    }
+
+    // todo
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    let addr = "127.0.0.1:7962";
+    let mut listener = TcpListener::bind(addr).await.unwrap();
     let encrypter = Arc::new(Mutex::new(Encypter::new()));
 
-    let local_server =
-    listener.incoming().for_each(move |client| {
-        println!("New connection from: {:?}", client.peer_addr().unwrap());
-        process(client, Arc::clone(&encrypter));
-        Ok(())
-    })
-    .map_err(|e| {
-        println!("Error happened in serving: {:?}", e);
-    });
-    
-    println!("Server listening on {:?}", addr);
-    tokio::run(local_server);
+    let server = async move {
+        loop {
+            match listener.accept().await {
+                Ok((socket, _)) => {
+                    tokio::spawn(
+                        run(socket, encrypter.clone())
+                    );
+                },
+                Err(e) => println!("Error happened when accepting: {:?}", e),
+            }
+        }
+    }
 }
