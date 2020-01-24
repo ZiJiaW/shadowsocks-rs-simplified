@@ -6,17 +6,16 @@ This project implements a simplified shadowsocks model based on crate tokio, tru
 
 So far I've finished most of it, including a local server and a remote server. Communication between then is partially encrypted. And a GUI for local server is on my schedule, but probably I don't have enough time to complete.
 
-**NOTE: Currently I'm rewriting it with the new tokio 0.2.0 and async/await feature**
+* 1.24: rewrite this project in tokio 0.2.x, futures 0.3.x and async/await;
 
 ## Dependencies
 
-tokio = "0.2.0"
+tokio = "0.2.10"
 
 futures = "0.3"
 
-openssl = "0.10" // In Windows you should install OpenSSL-win and add it to Path
+openssl = "0.10" // In Windows you should install OpenSSL-win and add it to Path ($env:OPENSSL_DIR)
 
-trust-dns = "0.16"
 
 ## Structure
 

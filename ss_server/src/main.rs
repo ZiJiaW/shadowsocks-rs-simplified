@@ -3,7 +3,7 @@ extern crate futures;
 
 use ss_local::Encypter;
 
-use futures::future::{join};
+use futures::future::{select};
 
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, lookup_host};
@@ -11,6 +11,7 @@ use tokio::net::{TcpListener, TcpStream, lookup_host};
 use std::sync::{Arc, Mutex, RwLock};
 use std::net::{Ipv4Addr, IpAddr, SocketAddr};
 use std::collections::HashMap;
+use futures::FutureExt;
 
 
 const PACKAGE_SIZE: usize = 8196;
@@ -41,7 +42,7 @@ async fn run(mut socket: TcpStream,
                 println!("address {} has been found", addr);
                 let ip = dns_map.read().unwrap().get(&addr).unwrap().clone();
                 let dst_addr = SocketAddr::new(ip, port);
-                TcpStream::connect(dst_addr).await?
+                TcpStream::connect(&dst_addr).await?
             } else {
                 addr = addr + ":" + &port.to_string();
                 let mut dst_addrs = lookup_host(&addr).await?;
@@ -62,27 +63,45 @@ async fn run(mut socket: TcpStream,
     let local_to_dst = async move {
         loop {
             let mut buf = vec![0u8; 2];
-            local_reader.read_exact(&mut buf).await.unwrap();
+            if local_reader.read_exact(&mut buf).await.is_err() {
+                break;
+            }
             let len: usize = ((buf[1] as usize) << 8) | (buf[0] as usize);
             buf.resize(len, 0u8);
-            local_reader.read_exact(&mut buf).await.unwrap();
+
+            if local_reader.read_exact(&mut buf).await.is_err() {
+                break;
+            }
             let data = inner1.lock().unwrap().decode(&buf[0..len]);
-            dst_writer.write_all(&data).await.unwrap();
+            if dst_writer.write_all(&data).await.is_err() {
+                break;
+            }
         }
     };
 
     let dst_to_local = async move {
         loop {
             let mut buf = vec![0u8; PACKAGE_SIZE];
-            let len = dst_reader.read(&mut buf).await.unwrap();
-            let mut data = inner2.lock().unwrap().encode(&buf[0..len]);
-            let len = data.len().to_le_bytes();
-            data.insert(0, len[1]);
-            data.insert(0, len[0]);
-            local_writer.write_all(&data).await.unwrap();
+            match dst_reader.read(&mut buf).await {
+                Ok(len) => {
+                    if len == 0 {
+                        break;
+                    }
+                    let mut data = inner2.lock().unwrap().encode(&buf[0..len]);
+                    let len = data.len().to_le_bytes();
+                    data.insert(0, len[1]);
+                    data.insert(0, len[0]);
+                    local_writer.write_all(&data).await.unwrap();
+                },
+                Err(_) => {
+                    break;
+                }
+            }
         }
     };
-    join(local_to_dst, dst_to_local).await;
+
+    select(local_to_dst.boxed(), dst_to_local.boxed()).await;
+    println!("connection close!");
     Ok(())
 }
 
@@ -104,6 +123,6 @@ async fn main() {
             }
         }
     };
-    println!("Server listening on {}", addr);
+    println!("Remote server listening on {}", addr);
     server.await;
 }
