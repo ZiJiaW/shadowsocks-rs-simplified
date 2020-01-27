@@ -379,14 +379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ss_gui"
-version = "0.1.0"
-dependencies = [
- "futures 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio 0.2.10 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
 name = "ss_local"
 version = "0.1.0"
 dependencies = [

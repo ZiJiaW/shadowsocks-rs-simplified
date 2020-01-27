@@ -3,5 +3,4 @@
 members = [
     "ss_local",
     "ss_server",
-    "ss_gui",
 ]

@@ -21,7 +21,6 @@ openssl = "0.10" // In Windows you should install OpenSSL-win and add it to Path
 
 1. ss_local: local server (listening on 7962 port)
 2. ss_server: remote server (listening on 9002 port)
-3. ss_gui: not implemented yet...
 
 ## Test
 
